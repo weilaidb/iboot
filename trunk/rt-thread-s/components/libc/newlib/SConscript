@@ -1,0 +1,8 @@
+Import('RTT_ROOT')
+from building import *
+
+src	= Glob('*.c')
+CPPPATH = [RTT_ROOT + '/components/libc/newlib']
+group = DefineGroup('newlib', src, depend = ['RT_USING_NEWLIB'], CPPPATH = CPPPATH)
+
+Return('group')

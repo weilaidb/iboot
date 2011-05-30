@@ -1,0 +1,8 @@
+Import('RTT_ROOT')
+from building import *
+
+src	= Glob('*.c')
+CPPPATH = [RTT_ROOT + '/components/usb']
+group = DefineGroup('USB', src, depend = ['RT_USING_USB_DEVICE'], CPPPATH = CPPPATH)
+
+Return('group')
