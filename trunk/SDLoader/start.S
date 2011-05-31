@@ -39,7 +39,6 @@ _start:
 
     // setup stack
     ldr     sp, =0x0c005ff8
-    bl      lcd_bl_close
 
     // disable vector interrupt
     mrc    p15, 0, r0, c1, c0, 0

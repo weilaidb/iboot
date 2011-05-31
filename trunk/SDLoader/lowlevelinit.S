@@ -21,34 +21,6 @@
 
 
     /*
-     * close lcd backlight
-     */
-    .globl lcd_bl_close
-lcd_bl_close:
-    /* LED on only #8 */
-    ldr     r0, =ELFIN_GPIO_BASE
-
-    ldr     r1, =0x55540000
-    str     r1, [r0, #oGPNCON]
-    ldr     r1, =0x55555555
-    str     r1, [r0, #oGPNPUD]
-    ldr     r1, =0xf000
-    str     r1, [r0, #oGPNDAT]
-
-    ldr     r1, =0x01
-    str     r1, [r0, #oGPECON]
-    ldr     r1, =0x00
-    str     r1, [r0, #oGPEDAT]
-
-    ldr     r1, =0x2A5AAAAA
-    str     r1, [r0, #oGPPCON]
-    ldr     r1, =0x0
-    str     r1, [r0, #oGPPDAT]
-
-    mov     pc, lr
-
-
-    /*
      * clock setup
      */
     .globl clock_setup
