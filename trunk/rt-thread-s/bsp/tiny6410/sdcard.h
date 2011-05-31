@@ -1,5 +1,5 @@
 /*
- * File      : led.h
+ * File      : sdcard.h
  * This file is part of RT-Thread RTOS
  * COPYRIGHT (C) 2006, RT-Thread Develop Team
  *
@@ -17,5 +17,12 @@
 
 #define SDCLK			20000000
 #define MMCCLK			15000000
+
+
+typedef struct _rt_crad
+{
+	int present;
+} rt_card_t;
+
 
 #endif /* end of __SDCARD_H__ */

@@ -1,5 +1,5 @@
 /*
- * File      : led.h
+ * File      : sdcard.h
  * This file is part of RT-Thread RTOS
  * COPYRIGHT (C) 2006, RT-Thread Develop Team
  *
@@ -11,12 +11,13 @@
  * Date           Author       Notes
  * 2011-05-29     swkyer       tiny6410
  */
-#include <rtthread.h>
+#include <rthw.h>
 #include "s3c6410.h"
 #include "tiny6410.h"
 #include "clock.h"
 #include "sdcard.h"
 
+static rt_card_t s_sd_card;
 
 static rt_uint32_t sd_clk_get(void)
 {
@@ -77,12 +78,87 @@ static void sd_clk_disable(void)
 	s3c_writew(wval, SD0CLKCON);
 }
 
-void rt_hw_sdcard_init()
+static void rt_hsmmc0_isr_handler(int vector)
+{
+	rt_uint16_t wval;
+	rt_uint32_t dval;
+
+	// clear interrupt status
+	wval = s3c_readw(SD0NORINTSTS);
+	wval |= (3 << 7);
+	s3c_writew(wval, SD0NORINTSTS);
+
+	dval = s3c_readl(SD0PRNSTS) & (1 << 16);
+	if (dval)
+	{
+		s_sd_card.present = 1;
+		rt_kprintf("SD card insert!\n");
+		// TODO, supply the power and the clock
+	}
+	else
+	{
+		s_sd_card.present = 0;
+		rt_kprintf("SD card remove!\n");
+		// TODO, disable SD bus power, disable clock, by reseting the host controller
+	}
+	// TODO, report the card status
+}
+
+static void sd_enable_detection(void)
+{
+	rt_uint16_t wval;
+	rt_uint32_t dval;
+
+	wval = s3c_readw(SD0NORINTSTSEN);
+	wval |= (3 << 7);
+	s3c_writew(wval, SD0NORINTSTSEN);
+
+	wval = s3c_readw(SD0NORINTSIGEN);
+	wval |= (3 << 7);
+	s3c_writew(wval, SD0NORINTSIGEN);
+
+	dval = s3c_readl(SD0PRNSTS) & (1 << 18);
+	if (dval)
+	{
+		s_sd_card.present = 1;
+		rt_kprintf("SD card present.\n");
+		// TODO, report the card status
+	}
+	else
+	{
+		s_sd_card.present = 0;
+		rt_kprintf("No SD card present.\n");
+	}
+
+	// install interrupt routine
+	rt_hw_interrupt_install(IRQ_HSMMC0, rt_hsmmc0_isr_handler, RT_NULL);
+	rt_hw_interrupt_umask(IRQ_HSMMC0);
+}
+
+static void sd_disable_detection(void)
+{
+	rt_uint16_t wval;
+
+	wval = s3c_readw(SD0NORINTSTSEN);
+	wval &= ~(3 << 7);
+	s3c_writew(wval, SD0NORINTSTSEN);
+
+	wval = s3c_readw(SD0NORINTSIGEN);
+	wval &= ~(3 << 7);
+	s3c_writew(wval, SD0NORINTSIGEN);
+
+	rt_hw_interrupt_mask(IRQ_HSMMC0);
+	rt_hw_interrupt_install(IRQ_HSMMC0, RT_NULL, RT_NULL);
+}
+
+void rt_hw_sdcard_init(void)
 {
 	sd_clk_init();
+	sd_enable_detection();
 
 	rt_kprintf("SD0 Clock: %dMHz\n", sd_clk_get()/1000000);
 }
+
 
 #if 0
 extern rt_uint32_t PCLK;
