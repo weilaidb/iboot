@@ -1,5 +1,5 @@
 /*
- * File      : sdcard.h
+ * File      : sdcard.c
  * This file is part of RT-Thread RTOS
  * COPYRIGHT (C) 2006, RT-Thread Develop Team
  *
@@ -17,20 +17,25 @@
 #include "clock.h"
 #include "sdcard.h"
 
-static rt_card_t s_sd_card;
 
-static rt_uint32_t sd_clk_get(void)
+static rt_card_t sd0_card =
+{
+	.index = 0,
+	.regbase = ELFIN_HSMMC_0_BASE,
+};
+
+static rt_uint32_t sd_clk_get(rt_card_t *psd)
 {
 	rt_uint32_t regv;
 
 	regv = s3c_get_uclk();
 	regv /= (s3c_readl(CLK_DIV1) & 0x0f) + 1;
-	regv /= ((s3c_readw(SD0CLKCON) & 0xff00) >> 8) * 2;
+	regv /= ((s3c_readw(psd->regbase + oCLKCON) & 0xff00) >> 8) * 2;
 
 	return regv;
 }
 
-static void sd_clk_init(void)
+static void sd_sys_clk_init(void)
 {
 	rt_uint32_t regv, val;
 
@@ -50,84 +55,114 @@ static void sd_clk_init(void)
 
 	regv = s3c_readl(HCLK_GATE);
 	regv |= (1 << 17);
-	s3c_writel(regv, HCLK_GATE);	// open hsmmc0 clock
-
-	s3c_writew(0x0100, SD0CLKCON);	// 21M/2 = 10.5M, clock disable
+	s3c_writel(regv, HCLK_GATE);	// open hsmmc0 clock, 20MHz
 }
 
-static void sd_clk_enable(void)
+static void sd_clk_init(rt_card_t *psd, rt_uint8_t divider)
+{
+	// SD clock input is 20MHz
+	s3c_writew((divider << 8), psd->regbase + oCLKCON);
+}
+
+static void sd_clk_enable(rt_card_t *psd)
 {
 	rt_uint16_t wval;
 
 	wval = 0x0101;
-	s3c_writew(wval, SD0CLKCON);	// 21M/2 = 10.5M
+	s3c_writew(wval, psd->regbase + oCLKCON);	// 21M/2 = 10.5M
 	// wait for stable
-	while (!(s3c_readw(SD0CLKCON) & 0x02));
+	while (!(s3c_readw(psd->regbase + oCLKCON) & 0x02));
 
-	wval = s3c_readw(SD0CLKCON);
+	wval = s3c_readw(psd->regbase + oCLKCON);
 	wval |= (1 << 2);
-	s3c_writew(wval, SD0CLKCON);
+	s3c_writew(wval, psd->regbase + oCLKCON);
 }
 
-static void sd_clk_disable(void)
+static void sd_clk_disable(rt_card_t *psd)
 {
 	rt_uint16_t wval;
 
-	wval = s3c_readw(SD0CLKCON);
+	wval = s3c_readw(psd->regbase + oCLKCON);
 	wval &= ~(1 << 2);
-	s3c_writew(wval, SD0CLKCON);
+	s3c_writew(wval, psd->regbase + oCLKCON);
+}
+
+static void sd_bit_width(rt_card_t *psd, int bitw)
+{
+	rt_uint8_t bval;
+
+	bval = s3c_readb(psd->regbase + oHOSTCTL);
+	if (bitw == 4)			// 4-bit
+	{
+		bval &= ~(1 << 5);
+		bval |= (1 << 1);
+	}
+	else if (bitw == 8)		// 8-bit
+	{
+		bval |= (1 << 5);
+		bval &= ~(1 << 1);
+	}
+	else					// 1-bit
+	{
+		bval &= ~(1 << 5);
+		bval &= ~(1 << 1);
+	}
+	s3c_writeb(bval, psd->regbase + oHOSTCTL);
 }
 
 static void rt_hsmmc0_isr_handler(int vector)
 {
 	rt_uint16_t wval;
 	rt_uint32_t dval;
+	rt_card_t *psd = &sd0_card;
 
 	// clear interrupt status
-	wval = s3c_readw(SD0NORINTSTS);
+	wval = s3c_readw(psd->regbase + oNORINTSTS);
 	wval |= (3 << 7);
-	s3c_writew(wval, SD0NORINTSTS);
+	s3c_writew(wval, psd->regbase + oNORINTSTS);
 
-	dval = s3c_readl(SD0PRNSTS) & (1 << 16);
+	dval = s3c_readl(psd->regbase + oPRNSTS) & (1 << 16);
 	if (dval)
 	{
-		s_sd_card.present = 1;
-		rt_kprintf("SD card insert!\n");
+		psd->present = 1;
+		rt_kprintf("[SD%d] SD card insert!\n", psd->index);
 		// TODO, supply the power and the clock
+		sd_clk_enable(psd);
 	}
 	else
 	{
-		s_sd_card.present = 0;
-		rt_kprintf("SD card remove!\n");
+		psd->present = 0;
+		rt_kprintf("[SD%d] SD card remove!\n", psd->index);
 		// TODO, disable SD bus power, disable clock, by reseting the host controller
+		sd_clk_disable(psd);
 	}
 	// TODO, report the card status
 }
 
-static void sd_enable_detection(void)
+static void sd_enable_detection(rt_card_t *psd)
 {
 	rt_uint16_t wval;
 	rt_uint32_t dval;
 
-	wval = s3c_readw(SD0NORINTSTSEN);
+	wval = s3c_readw(psd->regbase + oNORINTSTSEN);
 	wval |= (3 << 7);
-	s3c_writew(wval, SD0NORINTSTSEN);
+	s3c_writew(wval, psd->regbase + oNORINTSTSEN);
 
-	wval = s3c_readw(SD0NORINTSIGEN);
+	wval = s3c_readw(psd->regbase + oNORINTSIGEN);
 	wval |= (3 << 7);
-	s3c_writew(wval, SD0NORINTSIGEN);
+	s3c_writew(wval, psd->regbase + oNORINTSIGEN);
 
-	dval = s3c_readl(SD0PRNSTS) & (1 << 18);
+	dval = s3c_readl(psd->regbase + oPRNSTS) & (1 << 18);
 	if (dval)
 	{
-		s_sd_card.present = 1;
-		rt_kprintf("SD card present.\n");
+		psd->present = 1;
+		rt_kprintf("[SD%d] SD card present.\n", psd->index);
 		// TODO, report the card status
 	}
 	else
 	{
-		s_sd_card.present = 0;
-		rt_kprintf("No SD card present.\n");
+		psd->present = 0;
+		rt_kprintf("[SD%d] No SD card present.\n", psd->index);
 	}
 
 	// install interrupt routine
@@ -135,28 +170,55 @@ static void sd_enable_detection(void)
 	rt_hw_interrupt_umask(IRQ_HSMMC0);
 }
 
-static void sd_disable_detection(void)
+static void sd_disable_detection(rt_card_t *psd)
 {
 	rt_uint16_t wval;
 
-	wval = s3c_readw(SD0NORINTSTSEN);
+	wval = s3c_readw(psd->regbase + oNORINTSTSEN);
 	wval &= ~(3 << 7);
-	s3c_writew(wval, SD0NORINTSTSEN);
+	s3c_writew(wval, psd->regbase + oNORINTSTSEN);
 
-	wval = s3c_readw(SD0NORINTSIGEN);
+	wval = s3c_readw(psd->regbase + oNORINTSIGEN);
 	wval &= ~(3 << 7);
-	s3c_writew(wval, SD0NORINTSIGEN);
+	s3c_writew(wval, psd->regbase + oNORINTSIGEN);
 
 	rt_hw_interrupt_mask(IRQ_HSMMC0);
 	rt_hw_interrupt_install(IRQ_HSMMC0, RT_NULL, RT_NULL);
 }
 
+void sd_cfg(rt_card_t *psd)
+{
+	rt_uint32_t ctrl2, ctrl3;
+
+	s3c_writel(SD_CONTROL4_DRIVE_9mA, psd->regbase + oCONTROL4);
+
+	ctrl2 = s3c_readl(psd->regbase + oCONTROL2);
+	ctrl2 &= SD_CTRL2_SELBASECLK_MASK;
+	ctrl2 |= (SD_CTRL2_ENSTAASYNCCLR | SD_CTRL2_ENCMDCNFMSK
+			| SD_CTRL2_ENFBCLKRX | SD_CTRL2_DFCNT_NONE
+			| SD_CTRL2_ENCLKOUTHOLD);
+
+	ctrl3 = (SD_CTRL3_FCSEL3 | SD_CTRL3_FCSEL2
+			| SD_CTRL3_FCSEL1 | SD_CTRL3_FCSEL0);
+
+	rt_kprintf("[SD%d] CTRL2=%08x, CTRL3=%08x\n", psd->index, ctrl2, ctrl3);
+	s3c_writel(ctrl2, psd->regbase + oCONTROL2);
+	s3c_writel(ctrl3, psd->regbase + oCONTROL3);
+
+	// TODO, configure the multi-function pin
+}
+
+
 void rt_hw_sdcard_init(void)
 {
-	sd_clk_init();
-	sd_enable_detection();
+	sd_sys_clk_init();
 
-	rt_kprintf("SD0 Clock: %dMHz\n", sd_clk_get()/1000000);
+	sd_clk_init(&sd0_card, 1);
+	sd_cfg(&sd0_card);
+	sd_bit_width(&sd0_card, 4);
+	sd_enable_detection(&sd0_card);
+
+	rt_kprintf("[SD%d] SD0 Clock: %dMHz\n", sd0_card.index, sd_clk_get(&sd0_card)/1000000);
 }
 
 
