@@ -9,31 +9,18 @@
  *
  * Change Logs:
  * Date           Author       Notes
+ * xxxx           u-boot
  * 2011-05-29     swkyer       tiny6410
  */
 #include <rthw.h>
 #include "s3c6410.h"
 #include "tiny6410.h"
 #include "clock.h"
+#include "sdmmc_protocol.h"
 #include "sdcard.h"
 
 
-static rt_card_t sd0_card =
-{
-	.index = 0,
-	.regbase = ELFIN_HSMMC_0_BASE,
-};
 
-static rt_uint32_t sd_clk_get(rt_card_t *psd)
-{
-	rt_uint32_t regv;
-
-	regv = s3c_get_uclk();
-	regv /= (s3c_readl(CLK_DIV1) & 0x0f) + 1;
-	regv /= ((s3c_readw(psd->regbase + oCLKCON) & 0xff00) >> 8) * 2;
-
-	return regv;
-}
 
 static void sd_sys_clk_init(void)
 {
@@ -56,6 +43,17 @@ static void sd_sys_clk_init(void)
 	regv = s3c_readl(HCLK_GATE);
 	regv |= (1 << 17);
 	s3c_writel(regv, HCLK_GATE);	// open hsmmc0 clock, 20MHz
+}
+/*
+static rt_uint32_t sd_clk_get(rt_card_t *psd)
+{
+	rt_uint32_t regv;
+
+	regv = s3c_get_uclk();
+	regv /= (s3c_readl(CLK_DIV1) & 0x0f) + 1;
+	regv /= ((s3c_readw(psd->regbase + oCLKCON) & 0xff00) >> 8) * 2;
+
+	return regv;
 }
 
 static void sd_clk_init(rt_card_t *psd, rt_uint8_t divider)
@@ -110,81 +108,6 @@ static void sd_bit_width(rt_card_t *psd, int bitw)
 	s3c_writeb(bval, psd->regbase + oHOSTCTL);
 }
 
-static void rt_hsmmc0_isr_handler(int vector)
-{
-	rt_uint16_t wval;
-	rt_uint32_t dval;
-	rt_card_t *psd = &sd0_card;
-
-	// clear interrupt status
-	wval = s3c_readw(psd->regbase + oNORINTSTS);
-	wval |= (3 << 7);
-	s3c_writew(wval, psd->regbase + oNORINTSTS);
-
-	dval = s3c_readl(psd->regbase + oPRNSTS) & (1 << 16);
-	if (dval)
-	{
-		psd->present = 1;
-		rt_kprintf("[SD%d] SD card insert!\n", psd->index);
-		// TODO, supply the power and the clock
-		sd_clk_enable(psd);
-	}
-	else
-	{
-		psd->present = 0;
-		rt_kprintf("[SD%d] SD card remove!\n", psd->index);
-		// TODO, disable SD bus power, disable clock, by reseting the host controller
-		sd_clk_disable(psd);
-	}
-	// TODO, report the card status
-}
-
-static void sd_enable_detection(rt_card_t *psd)
-{
-	rt_uint16_t wval;
-	rt_uint32_t dval;
-
-	wval = s3c_readw(psd->regbase + oNORINTSTSEN);
-	wval |= (3 << 7);
-	s3c_writew(wval, psd->regbase + oNORINTSTSEN);
-
-	wval = s3c_readw(psd->regbase + oNORINTSIGEN);
-	wval |= (3 << 7);
-	s3c_writew(wval, psd->regbase + oNORINTSIGEN);
-
-	dval = s3c_readl(psd->regbase + oPRNSTS) & (1 << 18);
-	if (dval)
-	{
-		psd->present = 1;
-		rt_kprintf("[SD%d] SD card present.\n", psd->index);
-		// TODO, report the card status
-	}
-	else
-	{
-		psd->present = 0;
-		rt_kprintf("[SD%d] No SD card present.\n", psd->index);
-	}
-
-	// install interrupt routine
-	rt_hw_interrupt_install(IRQ_HSMMC0, rt_hsmmc0_isr_handler, RT_NULL);
-	rt_hw_interrupt_umask(IRQ_HSMMC0);
-}
-
-static void sd_disable_detection(rt_card_t *psd)
-{
-	rt_uint16_t wval;
-
-	wval = s3c_readw(psd->regbase + oNORINTSTSEN);
-	wval &= ~(3 << 7);
-	s3c_writew(wval, psd->regbase + oNORINTSTSEN);
-
-	wval = s3c_readw(psd->regbase + oNORINTSIGEN);
-	wval &= ~(3 << 7);
-	s3c_writew(wval, psd->regbase + oNORINTSIGEN);
-
-	rt_hw_interrupt_mask(IRQ_HSMMC0);
-	rt_hw_interrupt_install(IRQ_HSMMC0, RT_NULL, RT_NULL);
-}
 
 void sd_cfg(rt_card_t *psd)
 {
@@ -207,338 +130,987 @@ void sd_cfg(rt_card_t *psd)
 
 	// TODO, configure the multi-function pin
 }
+*/
+
+static int wait_for_r_buf_ready(rt_card_t *psd)
+{
+	rt_uint32_t uloop = 0;
+
+	while (!(s3c_readw(psd->regbase + oNORINTSTS) & 0x20))
+	{
+		if (uloop % 500000 == 0 && uloop > 0)
+			return 0;
+		uloop++;
+	}
+	return 1;
+}
+
+static int wait_for_cmd_done(rt_card_t *psd)
+{
+	rt_uint32_t i;
+	rt_uint16_t n_int, e_int;
+
+	rt_kprintf("SD[%d] wait_for_cmd_done\n", psd->index);
+	for (i=0; i<0x20000000; i++)
+	{
+		n_int = s3c_readw(psd->regbase + oNORINTSTS);
+		rt_kprintf("SD[%d] HM_NORINTSTS: %04x\n", psd->index, n_int);
+		if (n_int & 0x8000)
+			break;
+		if (n_int & 0x0001)
+			return 0;
+	}
+
+	e_int = s3c_readw(psd->regbase + oERRINTSTS);
+	s3c_writew(e_int, psd->regbase + oERRINTSTS);
+	s3c_writew(n_int, psd->regbase + oNORINTSTS);
+	rt_kprintf("SD[%d] cmd error1: 0x%04x, HM_NORINTSTS: 0x%04x\n", psd->index, e_int, n_int);
+	return -1;
+}
+
+static int wait_for_data_done(rt_card_t *psd)
+{
+	while (!(s3c_readw(psd->regbase + oNORINTSTS) & 0x2))
+		return 1;
+	return 0;
+}
+
+static void clear_command_complete_status(rt_card_t *psd)
+{
+	s3c_writew(1 << 0, psd->regbase + oNORINTSTS);
+	while (s3c_readw(psd->regbase + oNORINTSTS) & 0x1)
+		s3c_writew(1 << 0, psd->regbase + oNORINTSTS);
+}
+
+static void clear_transfer_complete_status(rt_card_t *psd)
+{
+	s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 1), psd->regbase + oNORINTSTS);
+	while (s3c_readw(psd->regbase + oNORINTSTS) & 0x2)
+		s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 1), psd->regbase + oNORINTSTS);
+}
+
+static void clear_buffer_read_ready_status(rt_card_t *psd)
+{
+	s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 5), psd->regbase + oNORINTSTS);
+	while (s3c_readw(psd->regbase + oNORINTSTS) & 0x20)
+		s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 5), psd->regbase + oNORINTSTS);
+}
+
+static void sdmmc_reset(rt_card_t *psd)
+{
+	s3c_writeb(0x3, psd->regbase + oSWRST);
+}
+
+static void sdmmc_set_gpio(rt_card_t *psd)
+{
+	rt_uint32_t regv;
+
+	if (psd->index == 0)
+	{
+		regv = s3c_readl(GPGCON) & 0xf0000000;
+		s3c_writel(regv | 0x02222222, GPGCON);
+
+		regv = s3c_readl(GPGPUD) & 0xfffff000;
+		s3c_writel(regv, GPGPUD);
+	}
+	else if (psd->index == 1)
+	{
+		s3c_writel(0x00222222, GPHCON0);
+		s3c_writel(0x00000000, GPHCON1);
+
+		regv = s3c_readl(GPHPUD) & 0xfffff000;
+		s3c_writel(regv, GPHPUD);
+	}
+	else
+		rt_kprintf("SD[%d] ### HS-MMC channel is not defined!\n", psd->index);
+}
+
+static void set_transfer_mode_register(rt_card_t *psd, rt_uint32_t MultiBlk,
+										rt_uint32_t DataDirection, rt_uint32_t AutoCmd12En,
+										rt_uint32_t BlockCntEn, rt_uint32_t DmaEn)
+{
+	s3c_writew((s3c_readw(psd->regbase + oTRNMOD) & ~(0xffff)) | (MultiBlk << 5)
+			| (DataDirection << 4) | (AutoCmd12En << 2)
+			| (BlockCntEn << 1) | (DmaEn << 0), psd->regbase + oTRNMOD);
+	rt_kprintf("SD[%d] HM_TRNMOD = 0x%04x\n", psd->index, s3c_readw(psd->regbase + oTRNMOD));
+}
+
+static void set_arg_register(rt_card_t *psd, rt_uint32_t arg)
+{
+	s3c_writel(arg, psd->regbase + oARGUMENT);
+}
+
+static void set_blkcnt_register(rt_card_t *psd, rt_uint16_t uBlkCnt)
+{
+	s3c_writew(uBlkCnt, psd->regbase + oBLKCNT);
+}
+
+static void set_system_address_reg(rt_card_t *psd, rt_uint32_t SysAddr)
+{
+	s3c_writel(SysAddr, psd->regbase + oSDMASYSAD);
+}
+
+static void set_blksize_register(rt_card_t *psd, rt_uint16_t uDmaBufBoundary,
+									rt_uint16_t uBlkSize)
+{
+	s3c_writew((uDmaBufBoundary << 12) | (uBlkSize), psd->regbase + oBLKSIZE);
+}
+
+static void clear_err_interrupt_status(rt_card_t *psd)
+{
+	while (s3c_readw(psd->regbase + oNORINTSTS) & (0x1 << 15))
+	{
+		s3c_writew(s3c_readw(psd->regbase + oNORINTSTS), psd->regbase + oNORINTSTS);
+		s3c_writew(s3c_readw(psd->regbase + oERRINTSTS), psd->regbase + oERRINTSTS);
+	}
+}
+
+static void interrupt_enable(rt_card_t *psd, rt_uint16_t NormalIntEn,
+								rt_uint16_t ErrorIntEn)
+{
+	clear_err_interrupt_status(psd);
+	s3c_writew(NormalIntEn, psd->regbase + oNORINTSTSEN);
+	s3c_writew(ErrorIntEn, psd->regbase + oERRINTSTSEN);
+}
+
+static void clock_onoff(rt_card_t *psd, int on)
+{
+	rt_uint16_t reg16;
+
+	if (on == 0)
+	{
+		reg16 = s3c_readw(psd->regbase + oCLKCON) & ~(0x1<<2);
+		s3c_writew(reg16, psd->regbase + oCLKCON);
+	}
+	else
+	{
+		reg16 = s3c_readw(psd->regbase + oCLKCON);
+		s3c_writew(reg16 | (0x1<<2), psd->regbase + oCLKCON);
+
+		while (1)
+		{
+			reg16 = s3c_readw(psd->regbase + oCLKCON);
+			if (reg16 & (0x1<<3))	//  SD_CLKSRC is Stable
+				break;
+		}
+	}
+}
+
+static void set_clock(rt_card_t *psd, rt_uint32_t clksrc, rt_uint32_t div)
+{
+	rt_uint16_t reg16;
+	rt_uint32_t i;
+
+	// rx feedback control
+	s3c_writel(0xC0004100 | (clksrc << 4), psd->regbase + oCONTROL2);
+	// Low clock: 00008080
+	s3c_writel(0x00008080, psd->regbase + oCONTROL3);
+	s3c_writel(0x3 << 16, psd->regbase + oCONTROL4);
+
+	s3c_writew(s3c_readw(psd->regbase + oCLKCON) & ~(0xff << 8), psd->regbase + oCLKCON);
+	// SDCLK Value Setting + Internal Clock Enable
+	s3c_writew(((div<<8) | 0x1), psd->regbase + oCLKCON);
+
+	// CheckInternalClockStable
+	for (i=0; i<0x10000; i++)
+	{
+		reg16 = s3c_readw(psd->regbase + oCLKCON);
+		if (reg16 & 0x2)
+			break;
+	}
+	if (i == 0x10000)
+		rt_kprintf("SD[%d] internal clock stabilization failed\n", psd->index);
+
+	rt_kprintf("SD[%d] HM_CONTROL2(0x80) = 0x%08x\n", psd->index, s3c_readl(psd->regbase + oCONTROL2));
+	rt_kprintf("SD[%d] HM_CONTROL3(0x84) = 0x%08x\n", psd->index, s3c_readl(psd->regbase + oCONTROL3));
+	rt_kprintf("SD[%d] HM_CLKCON  (0x2c) = 0x%04x\n", psd->index, s3c_readw(psd->regbase + oCLKCON));
+
+	clock_onoff(psd, 1);
+}
+
+static void set_cmd_register(rt_card_t *psd, rt_uint16_t cmd,
+								rt_uint32_t data, rt_uint32_t flags)
+{
+	rt_uint16_t val = (cmd << 8);
+
+	if (cmd == 12)
+		val |= (3 << 6);
+
+	if (flags & MMC_RSP_136)			// Long RSP
+		val |= 0x01;
+	else if (flags & MMC_RSP_BUSY)		// R1B
+		val |= 0x03;
+	else if (flags & MMC_RSP_PRESENT)	// Normal RSP
+		val |= 0x02;
+
+	if (flags & MMC_RSP_OPCODE)
+		val |= (1<<4);
+
+	if (flags & MMC_RSP_CRC)
+		val |= (1<<3);
+
+	if (data)
+		val |= (1<<5);
+
+	rt_kprintf("SD[%d] cmdreg =  0x%04x\n", psd->index, val);
+	s3c_writew(val, psd->regbase + oCMDREG);
+}
+
+static int issue_command(rt_card_t *psd, rt_uint16_t cmd,
+						rt_uint32_t arg, rt_uint32_t data, rt_uint32_t flags)
+{
+	int i;
+
+	rt_kprintf("SD[%d] ### issue_command: %d, %08x, %d, %08x\n", psd->index, cmd, arg, data, flags);
+	// Check CommandInhibit_CMD
+	for (i=0; i<0x1000000; i++)
+	{
+		if (!(s3c_readl(psd->regbase + oPRNSTS) & 0x1))
+			break;
+	}
+	if (i == 0x1000000)
+		rt_kprintf("SD[%d] ### rHM_PRNSTS: %08lx\n", psd->index, s3c_readl(psd->regbase + oPRNSTS));
+
+	// Check CommandInhibit_DAT
+	if (flags & MMC_RSP_BUSY)
+	{
+		for (i=0; i<0x1000000; i++)
+		{
+			if (!(s3c_readl(psd->regbase + oPRNSTS) & 0x2))
+				break;
+		}
+		if (i == 0x1000000)
+			rt_kprintf("SD[%d] ### rHM_PRNSTS: %08lx\n", psd->index, s3c_readl(psd->regbase + oPRNSTS));
+	}
+
+	s3c_writel(arg, psd->regbase + oARGUMENT);
+
+	set_cmd_register(psd, cmd, data, flags);
+
+	if (wait_for_cmd_done(psd))
+		return 0;
+	clear_command_complete_status(psd);
+
+	if (!(s3c_readw(psd->regbase + oNORINTSTS) & 0x8000))
+	{
+		return 1;
+	}
+	else
+	{
+		if (psd->ocr_check == 1)
+			return 0;
+		else
+		{
+			rt_kprintf("SD[%d] Command = %d, Error Stat = 0x%04x\n", psd->index,
+					(s3c_readw(psd->regbase + oCMDREG) >> 8),
+					s3c_readw(psd->regbase + oERRINTSTS));
+			return 0;
+		}
+	}
+}
+
+static void set_mmc_speed(rt_card_t *psd, rt_uint32_t eSDSpeedMode)
+{
+	rt_uint32_t ucSpeedMode, arg;
+
+	ucSpeedMode = (eSDSpeedMode == SD_SPEED_HIGH) ? 1 : 0;
+	//  Change to the high-speed mode
+	arg = (3 << 24) | (185 << 16) | (ucSpeedMode << 8);
+	while (!issue_command(psd, MMC_SWITCH, arg, 0, MMC_RSP_R1B));
+}
+
+static void set_sd_speed(rt_card_t *psd, rt_uint32_t eSDSpeedMode)
+{
+	rt_uint32_t arg = 0;
+	rt_uint8_t ucSpeedMode;
+	int i;
+
+	ucSpeedMode = (eSDSpeedMode == SD_SPEED_HIGH) ? 1 : 0;
+
+	if (!issue_command(psd, MMC_SET_BLOCKLEN, 64, 0, MMC_RSP_R1))
+	{
+		rt_kprintf("SD[%d] CMD16 fail\n", psd->index);
+	}
+	else
+	{
+		set_blksize_register(psd, 7, 64);
+		set_blkcnt_register(psd, 1);
+		set_arg_register(psd, 0 * 64);
+
+		set_transfer_mode_register(psd, 0, 1, 0, 0, 0);
+
+		arg = (0x1 << 31) | (0xffff << 8) | (ucSpeedMode << 0);
+		if (!issue_command(psd, MMC_SWITCH, arg, 0, MMC_RSP_R1B))
+		{
+			rt_kprintf("SD[%d] CMD6 fail\n", psd->index);
+		}
+		else
+		{
+			wait_for_r_buf_ready(psd);
+			clear_buffer_read_ready_status(psd);
+
+			for (i = 0; i < 16; i++)
+				s3c_readl(psd->regbase + oBDATA);
+
+			if (!wait_for_data_done(psd))
+				rt_kprintf("SD[%d] Transfer NOT Complete\n", psd->index);
+
+			clear_transfer_complete_status(psd);
+		}
+	}
+}
+
+static int get_sd_scr(rt_card_t *psd)
+{
+	rt_uint32_t uSCR1, uSCR2;
+
+	if (!issue_command(psd, MMC_SET_BLOCKLEN, 8, 0, MMC_RSP_R1))
+		return 0;
+	else
+	{
+		set_blksize_register(psd, 7, 8);
+		set_blkcnt_register(psd, 1);
+		set_arg_register(psd, 0 * 8);
+
+		set_transfer_mode_register(psd, 0, 1, 0, 0, 0);
+		if (!issue_command(psd, MMC_APP_CMD, psd->rca<<16, 0, MMC_RSP_R1))
+			return 0;
+		else
+		{
+			if (!issue_command(psd, SD_APP_SEND_SCR, 0, 1, MMC_RSP_R1))
+				return 0;
+			else
+			{
+				wait_for_r_buf_ready(psd);
+				clear_buffer_read_ready_status(psd);
+
+				uSCR1 = s3c_readl(psd->regbase + oBDATA);
+				uSCR2 = s3c_readl(psd->regbase + oBDATA);
+
+				if (!wait_for_data_done(psd))
+					rt_kprintf("SD[%d] Transfer NOT Complete\n", psd->index);
+
+				clear_transfer_complete_status(psd);
+
+				if (uSCR1 & 0x1)
+					psd->sd_spec = 1;	/*  Version 1.10, support cmd6 */
+				else
+					psd->sd_spec = 0;	/*  Version 1.0 ~ 1.01 */
+
+				rt_kprintf("SD[%d] sd_spec = %d(0x%08x)\n", psd->index, psd->sd_spec, uSCR1);
+				return 1;
+			}
+		}
+	}
+}
+
+static int check_card_status(rt_card_t *psd)
+{
+	if (!issue_command(psd, MMC_SEND_STATUS, psd->rca<<16, 0, MMC_RSP_R1))
+	{
+		return 0;
+	}
+	else
+	{
+		if (((s3c_readl(psd->regbase + oRSPREG0) >> 9) & 0xf) == 4)
+		{
+			rt_kprintf("SD[%d] Card is transfer status\n", psd->index);
+			return 1;
+		}
+	}
+
+	return 1;
+}
+
+static void set_hostctl_speed(rt_card_t *psd, rt_uint8_t mode)
+{
+	rt_uint8_t reg8;
+
+	reg8 = s3c_readb(psd->regbase + oHOSTCTL) & ~(0x1<<2);
+	s3c_writeb(reg8 | (mode<<2), psd->regbase + oHOSTCTL);
+}
+
+/* return 0: OK
+ * return -1: error
+ */
+static int set_bus_width(rt_card_t *psd, rt_uint8_t width)
+{
+	rt_uint32_t arg = 0;
+	rt_uint8_t reg = s3c_readb(psd->regbase + oHOSTCTL);
+	rt_uint8_t bitmode = 0;
+
+	rt_kprintf("SD[%d] bus width: %d\n", psd->index, width);
+
+	switch (width)
+	{
+	case 8:
+		width = psd->mmc_card ? 8 : 4;
+		break;
+	case 4:
+	case 1:
+		break;
+	default:
+		return -1;
+	}
+
+	rt_hw_interrupt_mask(IRQ_HSMMC0);	// Disable sd card interrupt
+
+	if (psd->mmc_card)	 /* MMC Card */
+	{
+		/* MMC Spec 4.x or above */
+		if (psd->mmc_spec == 4)
+		{
+			if (width == 1)
+				bitmode = 0;
+			else if (width == 4)
+				bitmode = 1;
+			else if (width == 8)
+				bitmode = 2;
+			else
+			{
+				rt_kprintf("SD[%d] #### unknown mode\n", psd->index);
+				return -1;
+			}
+
+			arg = ((3 << 24) | (183 << 16) | (bitmode << 8));
+			while (!issue_command(psd, MMC_SWITCH, arg, 0, MMC_RSP_R1B));
+		}
+		else
+			bitmode = 0;
+	}
+	else	 /* SD Card */
+	{
+		if (!issue_command(psd, MMC_APP_CMD, psd->rca<<16, 0, MMC_RSP_R1))
+			return -1;
+		else
+		{
+			if (width == 1)	// 1-bits
+			{
+				bitmode = 0;
+				if (!issue_command(psd, MMC_SWITCH, 0, 0, MMC_RSP_R1B))
+					return -1;
+			}
+			else			// 4-bits
+			{
+				bitmode = 1;
+				if (!issue_command(psd, MMC_SWITCH, 2, 0, MMC_RSP_R1B))
+					return -1;
+			}
+		}
+	}
+
+	if (bitmode == 2)
+		reg |= 1 << 5;
+	else
+		reg |= bitmode << 1;
+
+	s3c_writeb(reg, psd->regbase + oHOSTCTL);
+	rt_hw_interrupt_umask(IRQ_HSMMC0);
+	rt_kprintf("SD[%d] transfer rHM_HOSTCTL(0x28) = 0x%02x\n", psd->index,
+				s3c_readb(psd->regbase + oHOSTCTL));
+
+	return 0;
+}
+
+static int set_sd_ocr(rt_card_t *psd)
+{
+	rt_uint32_t i, ocr;
+
+	issue_command(psd, MMC_APP_CMD, 0x0, 0, MMC_RSP_R1);
+	issue_command(psd, SD_APP_OP_COND, 0x0, 0, MMC_RSP_R3);
+	ocr = s3c_readl(psd->regbase + oRSPREG0);
+	rt_kprintf("SD[%d] ocr1: %08x\n", psd->index, ocr);
+
+	for (i = 0; i < 250; i++)
+	{
+		issue_command(psd, MMC_APP_CMD, 0x0, 0, MMC_RSP_R1);
+		issue_command(psd, SD_APP_OP_COND, ocr, 0, MMC_RSP_R3);
+
+		ocr = s3c_readl(psd->regbase + oRSPREG0);
+		rt_kprintf("SD[%d] ocr2: %08x\n", psd->index, ocr);
+		if (ocr & (0x1 << 31))
+		{
+			rt_kprintf("SD[%d] Voltage range: ", psd->index);
+			if (ocr & (1 << 21))
+				rt_kprintf("2.7V ~ 3.4V");
+			else if (ocr & (1 << 20))
+				rt_kprintf("2.7V ~ 3.3V");
+			else if (ocr & (1 << 19))
+				rt_kprintf("2.7V ~ 3.2V");
+			else if (ocr & (1 << 18))
+				rt_kprintf("2.7V ~ 3.1V");
+
+			if (ocr & (1 << 7))
+				rt_kprintf(", 1.65V ~ 1.95V\n");
+			else
+				rt_kprintf("\n");
+
+			psd->mmc_card = 0;
+			return 1;
+		}
+		//udelay(1000);
+	}
+
+	// The current card is MMC card, then there's time out error, need to be cleared.
+	clear_err_interrupt_status(psd);
+	return 0;
+}
+
+static int set_mmc_ocr(rt_card_t *psd)
+{
+	rt_uint32_t i, ocr;
+
+	for (i = 0; i < 250; i++)
+	{
+		issue_command(psd, MMC_SEND_OP_COND, 0x40FF8000, 0, MMC_RSP_R3);
+
+		ocr = s3c_readl(psd->regbase + oRSPREG0);
+		rt_kprintf("SD[%d] ocr1: %08x\n", psd->index, ocr);
+
+		if (ocr & (0x1 << 31)) {
+			rt_kprintf("SD[%d] Voltage range: ", psd->index);
+			if (ocr & (1 << 21))
+				rt_kprintf("2.7V ~ 3.4V");
+			else if (ocr & (1 << 20))
+				rt_kprintf("2.7V ~ 3.3V");
+			else if (ocr & (1 << 19))
+				rt_kprintf("2.7V ~ 3.2V");
+			else if (ocr & (1 << 18))
+				rt_kprintf("2.7V ~ 3.1V");
+			psd->mmc_card = 1;
+			if (ocr & (1 << 7))
+				rt_kprintf(", 1.65V ~ 1.95V\n");
+			else
+				rt_kprintf("\n");
+			return 1;
+		}
+	}
+
+	// The current card is SD card, then there's time out error, need to be cleared.
+	clear_err_interrupt_status(psd);
+	return 0;
+}
+
+static void clock_config(rt_card_t *psd, rt_uint32_t clksrc, rt_uint32_t Divisior)
+{
+	rt_uint32_t SrcFreq, WorkingFreq;
+
+	if (clksrc == SD_CLKSRC_HCLK)
+		SrcFreq = s3c_get_hclk();
+	else if (clksrc == SD_CLKSRC_EPLL)	// Epll Out 84MHz
+		SrcFreq = s3c_get_uclk();
+	else
+		SrcFreq = s3c_get_hclk();
+
+	WorkingFreq = SrcFreq / (Divisior * 2);
+	rt_kprintf("SD[%d] Card Working Frequency = %dMHz\n", psd->index, WorkingFreq / (1000000));
+
+	if (psd->mmc_card)
+	{
+		if (psd->mmc_spec == 4)
+		{
+			if (WorkingFreq > 20000000)
+			{
+				// It is necessary to enable the high speed mode in the card before changing the clock freq to a freq higher than 20MHz.
+				set_mmc_speed(psd, SD_SPEED_HIGH);
+				rt_kprintf("SD[%d] Set MMC High speed mode OK!!\n", psd->index);
+			}
+			else
+			{
+				set_mmc_speed(psd, SD_SPEED_NORMAL);
+				rt_kprintf("SD[%d] Set MMC Normal speed mode OK!!\n", psd->index);
+			}
+		}
+		else		// old version
+			rt_kprintf("SD[%d] Old version MMC card can not support working frequency higher than 25MHz", psd->index);
+	}
+
+	if (WorkingFreq > 25000000)
+		// Higher than 25MHz, it is necessary to enable high speed mode of the host controller.
+		set_hostctl_speed(psd, SD_SPEED_HIGH);
+	else
+		set_hostctl_speed(psd, SD_SPEED_NORMAL);
+
+	// when change the sd clock frequency, need to stop sd clock.
+	clock_onoff(psd, 0);
+	set_clock(psd, clksrc, Divisior);
+	rt_kprintf("SD[%d] clock config rHM_HOSTCTL = 0x%02x\n", psd->index, s3c_readb(psd->regbase + oHOSTCTL));
+
+}
+
+static void check_dma_int(rt_card_t *psd)
+{
+	rt_uint32_t i;
+
+	for (i = 0; i < 0x1000000; i++)
+	{
+		if (s3c_readw(psd->regbase + oNORINTSTS) & 0x0002)
+		{
+			rt_kprintf("SD[%d] Transfer Complete\n", psd->index);
+			psd->dma_end = 1;
+			s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | 0x0002, psd->regbase + oNORINTSTS);
+			break;
+		}
+		if (s3c_readw(psd->regbase + oNORINTSTS) & 0x8000)
+		{
+			rt_kprintf("SD[%d] error found: %04x\n", psd->index, s3c_readw(psd->regbase + oERRINTSTS));
+			break;
+		}
+	}
+}
+/*
+static rt_uint32_t process_ext_csd(rt_card_t *psd)
+{
+	rt_uint8_t ext_csd[512];
+
+	rt_memset(ext_csd, 0, sizeof(ext_csd));
+
+	if (ext_csd >= (rt_uint8_t *)0xc0000000)
+		set_system_address_reg(psd, VIRT_2_PHYS((rt_uint32_t)ext_csd));
+	else
+		set_system_address_reg(psd, (rt_uint32_t)ext_csd);
+
+	set_blksize_register(psd, 7, 512);
+	set_blkcnt_register(psd, 1);
+	set_transfer_mode_register(psd, 0, 1, 0, 1, 1);
+
+	while (!issue_command(psd, MMC_SEND_EXT_CSD, 0, 1, MMC_RSP_R1 | MMC_CMD_ADTC));
+
+	check_dma_int(psd);
+	while (!psd->dma_end);
+
+	return (((ext_csd[215] << 24) | (ext_csd[214] << 16) | (ext_csd[213] << 8) | ext_csd[212]) / (2 * 1024));
+}
+*/
+static void display_card_info(rt_card_t *psd)
+{
+	rt_uint32_t card_size;
+	rt_uint32_t i, resp[4];
+	rt_uint32_t c_size, c_size_multi, read_bl_len, read_bl_partial, blk_size;
+
+	for (i=0; i<4; i++)
+	{
+		resp[i] = s3c_readl(psd->regbase + oRSPREG0+i*4);
+		rt_kprintf("%08x\n", resp[i]);
+	}
+
+	read_bl_len = ((resp[2] >> 8) & 0xf);
+	read_bl_partial = ((resp[2] >> 7) & 0x1);
+	c_size = ((resp[2] & 0x3) << 10) | ((resp[1] >> 22) & 0x3ff);
+	c_size_multi = ((resp[1] >> 7) & 0x7);
+
+	card_size = (1 << read_bl_len) * (c_size + 1) * (1 << (c_size_multi + 2)) / 1048576;
+	blk_size = (1 << read_bl_len);
+
+	rt_kprintf("SD[%d] read_bl_len: %d\n", psd->index, read_bl_len);
+	rt_kprintf("SD[%d] read_bl_partial: %d\n", psd->index, read_bl_partial);
+	rt_kprintf("SD[%d] c_size: %d\n", psd->index, c_size);
+	rt_kprintf("SD[%d] c_size_multi: %d\n", psd->index, c_size_multi);
+
+	rt_kprintf("SD[%d] One Block Size: %dByte\n", psd->index, blk_size);
+	rt_kprintf("SD[%d] Total Card Size: %dMByte\n\n", psd->index, card_size + 1);
+
+	rt_kprintf("SD[%d] %d MB ", psd->index, card_size + 1);
+	if (psd->card_mid == 0x15)
+		rt_kprintf("(MoviNAND)");
+	rt_kprintf("\n");
+}
+/*
+static void DataRead_ForCompare(rt_card_t *psd, int StartAddr)
+{
+	rt_uint32_t i = 0, j = 0;
+
+	COMPARE_INT_DONE = 0;
+
+	s3c_writew(s3c_readw(psd->regbase + oNORINTSIGEN) & ~(0xffff), psd->regbase + oNORINTSIGEN);
+
+	Compare_buffer_HSMMC = (rt_uint32_t *) SDI_Compare_buffer_HSMMC;
+	for (i = 0; i < (512 * BlockNum_HSMMC) / 4; i++)
+		*(Compare_buffer_HSMMC + i) = 0x0;
+
+	rt_kprintf("SD[%d] Polling mode data read1\n", psd->index);
+	rt_kprintf("SD[%d] Read BlockNum = %d\n", psd->index, BlockNum_HSMMC);
+
+	while (!check_card_status(psd));
+
+	//  Maximum DMA Buffer Size, Block Size
+	set_blksize_register(psd, 7, 512);
+	//  Block Numbers to Write
+	set_blkcnt_register(psd, BlockNum_HSMMC);
+
+	if (movi_hc)
+		set_arg_register(psd, StartAddr);
+	else
+		set_arg_register(psd, StartAddr * 512);
+
+	if (BlockNum_HSMMC == 1)
+	{
+		rt_kprintf("SD[%d] Single block read\n", psd->index);
+		set_transfer_mode_register(psd, 0, 1, 1, 1, 0);
+		// MMC_READ_SINGLE_BLOCK
+		set_cmd_register(psd, 17, 1, MMC_RSP_R1);
+	}
+	else
+	{
+		rt_kprintf("SD[%d] Multi block read\n", psd->index);
+		set_transfer_mode_register(psd, 1, 1, 1, 1, 0);
+		// MMC_READ_MULTIPLE_BLOCK
+		set_cmd_register(psd, 18, 1, MMC_RSP_R1);
+	}
+
+	if (wait_for_cmd_done(psd))
+		rt_kprintf("SD[%d] Command is NOT completed1\n", psd->index);
+	clear_command_complete_status();
+
+	for (j = 0; j < BlockNum_HSMMC; j++)
+	{
+		if (!wait_for_r_buf_ready(psd))
+			rt_kprintf("SD[%d] ReadBuffer NOT Ready\n", psd->index);
+		else
+			clear_buffer_read_ready_status(psd);
+		for (i = 0; i < 512 / 4; i++)
+		{
+			*Compare_buffer_HSMMC++ = s3c_readl(psd->regbase + oBDATA);
+			CompareCnt_INT++;
+		}
+	}
+
+	rt_kprintf("SD[%d] Read count=0x%08x\n", psd->index, CompareCnt_INT);
+	if (!wait_for_data_done(psd))
+		rt_kprintf("SD[%d] Transfer NOT Complete\n", psd->index);
+	clear_transfer_complete_status(psd);
+
+	rt_kprintf("SD[%d] HM_NORINTSTS = %x", psd->index, s3c_readw(psd->regbase + oNORINTSTS));
+}
+
+static void DataCompare_HSMMC(rt_card_t *psd, rt_uint32_t a0, rt_uint32_t a1, rt_uint32_t bytes)
+{
+	rt_uint32_t *pD0 = (rt_uint32_t *) a0;
+	rt_uint32_t *pD1 = (rt_uint32_t *) a1;
+	rt_uint32_t i, ErrCnt = 0;
+
+	for (i = 0; i < bytes; i++)
+	{
+		if (*pD0 != *pD1)
+		{
+			rt_kprintf("\n%08x=%02x <-> %08x=%02x", pD0, *pD0, pD1, *pD1);
+			ErrCnt++;
+		}
+		pD0++;
+		pD1++;
+	}
+	rt_kprintf("\nTotal Error cnt = %d", ErrCnt);
+
+	if (ErrCnt == 0)
+		rt_kprintf("\nData Compare Ok\n");
+}*/
+
+int sdmmc_init(rt_card_t *psd)
+{
+	rt_uint32_t reg;
+
+	clock_onoff(psd, 0);
+
+	reg = s3c_readl(SCLK_GATE);
+	s3c_writel(reg | (1<<27), SCLK_GATE);
+
+	set_clock(psd, SD_CLKSRC_EPLL, 0x80);
+	s3c_writeb(0xe, psd->regbase + oTIMEOUTCON);
+	set_hostctl_speed(psd, SD_SPEED_NORMAL);
+
+	interrupt_enable(psd, 0xff, 0xff);
+
+	rt_kprintf("SD[%d] HM_NORINTSTS = %x\n", psd->index, s3c_readw(psd->regbase + oNORINTSTS));
+
+	/* MMC_GO_IDLE_STATE */
+	issue_command(psd, MMC_GO_IDLE_STATE, 0x00, 0, 0);
+
+	psd->ocr_check = 1;
+	if (set_mmc_ocr(psd))
+	{
+		psd->mmc_card = 1;
+		rt_kprintf("SD[%d] MMC card is detected\n", psd->index);
+	}
+	else if (set_sd_ocr(psd))
+	{
+		psd->mmc_card = 0;
+		rt_kprintf("SD[%d] SD card is detected\n", psd->index);
+	}
+	else
+	{
+		rt_kprintf("SD[%d] 0 MB\n", psd->index);
+		return -1;
+	}
+	psd->ocr_check = 0;
+
+	// Check the attached card and place the card
+	// in the IDENT state rHM_RSPREG0
+	issue_command(psd, MMC_ALL_SEND_CID, 0, 0, MMC_RSP_R2);
+
+	// Manufacturer ID
+	psd->card_mid = (s3c_readl(psd->regbase + oRSPREG3) >> 16) & 0xFF;
+
+	rt_kprintf("Product Name : %c%c%c%c%c%c\n", ((s3c_readl(psd->regbase + oRSPREG2) >> 24) & 0xFF),
+	       ((s3c_readl(psd->regbase + oRSPREG2) >> 16) & 0xFF), ((s3c_readl(psd->regbase + oRSPREG2) >> 8) & 0xFF), (s3c_readl(psd->regbase + oRSPREG2) & 0xFF),
+	       ((s3c_readl(psd->regbase + oRSPREG1) >> 24) & 0xFF), ((s3c_readl(psd->regbase + oRSPREG1) >> 16) & 0xFF));
+
+	// Send RCA(Relative Card Address). It places the card in the STBY state
+	psd->rca = (psd->mmc_card) ? 0x0001 : 0x0000;
+	issue_command(psd, MMC_SET_RELATIVE_ADDR, psd->rca<<16, 0, MMC_RSP_R1);
+
+	if (!psd->mmc_card)
+	{
+		psd->rca = (s3c_readl(psd->regbase + oRSPREG0) >> 16) & 0xFFFF;
+		//printf("=>  rca=0x%08x\n", rca);
+	}
+
+	rt_kprintf("SD[%d] Enter to the Stand-by State\n", psd->index);
+
+	issue_command(psd, MMC_SEND_CSD, psd->rca<<16, 0, MMC_RSP_R2);
+
+	if (psd->mmc_card)
+	{
+		psd->mmc_spec = (s3c_readl(psd->regbase + oRSPREG3) >> 18) & 0xF;
+		rt_kprintf("SD[%d] mmc_spec=%d\n", psd->index, psd->mmc_spec);
+	}
+
+	issue_command(psd, MMC_SELECT_CARD, psd->rca<<16, 0, MMC_RSP_R1);
+	rt_kprintf("SD[%d] Enter to the Transfer State\n", psd->index);
+
+	display_card_info(psd);
+
+	// Operating Clock setting
+	// Divisor 1 = Base clk /2, Divisor 2 = Base clk /4, Divisor 4 = Base clk /8 ...
+	clock_config(psd, SD_CLKSRC_EPLL, 2);
+
+	while (set_bus_width(psd, psd->data_width));
+	while (!check_card_status(psd));
+
+	// MMC_SET_BLOCKLEN
+	while (!issue_command(psd, MMC_SET_BLOCKLEN, 512, 0, MMC_RSP_R1));
+
+	s3c_writew(0xffff, psd->regbase + oNORINTSTS);
+	return 0;
+}
+
+void sdmmc_write(rt_card_t *psd, rt_uint32_t addr, rt_uint32_t start_blk, rt_uint32_t blknum)
+{
+	rt_uint16_t cmd, multi;
+
+	psd->dma_end = 0;
+
+	cmd = s3c_readw(psd->regbase + oNORINTSTSEN);
+	//cmd &= ~0xffff;
+	cmd = BUFFER_READREADY_STS_INT_EN | BUFFER_WRITEREADY_STS_INT_EN |
+			TRANSFERCOMPLETE_STS_INT_EN | COMMANDCOMPLETE_STS_INT_EN;
+	s3c_writew(cmd, psd->regbase + oNORINTSTSEN);
+
+	cmd = s3c_readw(psd->regbase + oNORINTSIGEN);
+	//cmd &= ~0xffff;
+	cmd = TRANSFERCOMPLETE_SIG_INT_EN;
+	s3c_writew(cmd, psd->regbase + oNORINTSIGEN);
+
+	// AHB System Address For Write
+	set_system_address_reg(psd, addr);
+	// Maximum DMA Buffer Size, Block Size
+	set_blksize_register(psd, 7, CARD_ONE_BLOCK_SIZE_VER1);
+	// Block Numbers to Write
+	set_blkcnt_register(psd, blknum);
+
+	set_arg_register(psd, start_blk * CARD_ONE_BLOCK_SIZE_VER1);
+
+	cmd = (blknum > 1) ? MMC_WRITE_MULTIPLE_BLOCK : MMC_WRITE_BLOCK;
+	multi = (blknum > 1);
+
+	set_transfer_mode_register(psd, multi, 0, 1, 1, 1);
+	set_cmd_register(psd, cmd, 1, MMC_RSP_R1);
+
+	if (wait_for_cmd_done(psd))
+		rt_kprintf("SD[%d] Command is NOT completed3\n", psd->index);
+	clear_command_complete_status(psd);
+
+	// wait for DMA transfer
+	check_dma_int(psd);
+	while (!psd->dma_end);
+
+	if (!wait_for_data_done(psd))
+		rt_kprintf("SD[%d] Transfer is NOT Complete\n", psd->index);
+	clear_transfer_complete_status(psd);
+
+	s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 3), psd->regbase + oNORINTSTS);
+	psd->dma_end = 0;
+}
+
+void sdmmc_read(rt_card_t *psd, rt_uint32_t addr, rt_uint32_t start_blk, rt_uint32_t blknum)
+{
+	rt_uint16_t cmd, multi;
+
+	psd->dma_end = 0;
+
+	while (!check_card_status(psd));
+
+	cmd = s3c_readw(psd->regbase + oNORINTSTSEN);
+	cmd &= ~(DMA_STS_INT_EN | BLOCKGAP_EVENT_STS_INT_EN);
+	s3c_writew(cmd,	psd->regbase + oNORINTSTSEN);
+
+	cmd = s3c_readw(psd->regbase + oNORINTSIGEN);
+	//cmd &= ~0xffff;
+	cmd = TRANSFERCOMPLETE_SIG_INT_EN;
+	s3c_writew(cmd, psd->regbase + oNORINTSIGEN);
+
+	// AHB System Address For Write
+	set_system_address_reg(psd, addr);
+	// Maximum DMA Buffer Size, Block Size
+	set_blksize_register(psd, 7, CARD_ONE_BLOCK_SIZE_VER1);
+	// Block Numbers to Write
+	set_blkcnt_register(psd, blknum);
+
+	set_arg_register(psd, start_blk * CARD_ONE_BLOCK_SIZE_VER1);// Card Start Block Address to Write
+
+	cmd = (blknum > 1) ? MMC_READ_MULTIPLE_BLOCK : MMC_READ_SINGLE_BLOCK;
+	multi = (blknum > 1);
+
+	set_transfer_mode_register(psd, multi, 1, multi, 1, 1);
+	set_cmd_register(psd, cmd, 1, MMC_RSP_R1);
+
+	if (wait_for_cmd_done(psd))
+		rt_kprintf("SD[%d] Command is NOT completed\n", psd->index);
+	else
+		clear_command_complete_status(psd);
+
+	check_dma_int(psd);
+	while (!psd->dma_end);
+	rt_kprintf("SD[%d] DMA Read End\n", psd->index);
+
+	psd->dma_end = 0;
+}
+
+
+static rt_card_t sd0_card =
+{
+	.data_width = 4,
+	.index = 0,
+	.regbase = ELFIN_HSMMC_0_BASE,
+};
 
 
 void rt_hw_sdcard_init(void)
 {
+	rt_card_t *psd = &sd0_card;
+
 	sd_sys_clk_init();
 
-	sd_clk_init(&sd0_card, 1);
-	sd_cfg(&sd0_card);
-	sd_bit_width(&sd0_card, 4);
-	sd_enable_detection(&sd0_card);
-
-	rt_kprintf("[SD%d] SD0 Clock: %dMHz\n", sd0_card.index, sd_clk_get(&sd0_card)/1000000);
+	sdmmc_set_gpio(psd);
+	sdmmc_reset(psd);
+	if (sdmmc_init(psd) != 0)
+	{
+		rt_kprintf("SD[%d] Card Initialization FAILED\n", psd->index);
+		return;
+	}
 }
 
 
 #if 0
-extern rt_uint32_t PCLK;
-volatile rt_uint32_t rd_cnt;
-volatile rt_uint32_t wt_cnt;
-volatile rt_int32_t RCA;
-
-static void sd_delay(rt_uint32_t ms)
-{
-	ms *= 7326;
-	while (--ms);
-}
-
-static int sd_cmd_end(int cmd, int be_resp)
-{
-	int finish0;
-
-	if (!be_resp)
-	{
-		finish0 = SDICSTA;
-
-		while ((finish0&0x800)!=0x800)
-			finish0 = SDICSTA;
-
-		SDICSTA = finish0;
-
-		return RT_EOK;
-	}
-	else
-	{
-		finish0 = SDICSTA;
-
-		while (!(((finish0&0x200) == 0x200) | ((finish0&0x400) == 0x400)))
-			finish0 = SDICSTA;
-
-		if (cmd == 1 || cmd == 41)
-		{
-			if ((finish0&0xf00) != 0xa00)
-			{
-				SDICSTA = finish0;
-				if ((finish0&0x400) == 0x400)
-					return RT_ERROR;
-			}
-			SDICSTA = finish0;
-		}
-		else
-		{
-			if ((finish0&0x1f00) != 0xa00)
-			{
-				/*
-				rt_kprintf("CMD%d:SDICSTA=0x%x, SDIRSP0=0x%x\n",
-							cmd, SDICSTA, SDIRSP0);
-				 */
-				SDICSTA = finish0;
-				if ((finish0&0x400) == 0x400)
-					return RT_ERROR;
-			}
-			SDICSTA = finish0;
-		}
-		return RT_EOK;
-	}
-}
-
-static int sd_data_end(void)
-{
-	int finish;
-
-	finish = SDIDSTA;
-
-	while (!(((finish&0x10) == 0x10) | ((finish&0x20) == 0x20)))
-	{
-		finish = SDIDSTA;
-	}
-
-	if ((finish&0xfc) != 0x10)
-	{
-		SDIDSTA = 0xec;
-		return RT_ERROR;
-	}
-	return RT_EOK;
-}
-
-static void sd_cmd0(void)
-{
-	SDICARG = 0x0;
-	SDICCON = (1<<8)|0x40;
-
-	sd_cmd_end(0, 0);
-	SDICSTA = 0x800;	    /* Clear cmd_end(no rsp) */
-}
-
-static int sd_cmd55(void)
-{
-	SDICARG = RCA << 16;
-	SDICCON = (0x1 << 9) | (0x1 << 8) | 0x77;
-
-	if (sd_cmd_end(55, 1) == RT_ERROR)
-	{
-		/* rt_kprintf("CMD55 error\n"); */
-		return RT_ERROR;
-	}
-
-	SDICSTA = 0xa00;
-	return RT_EOK;
-}
-
-static void sd_sel_desel(char sel_desel)
-{
-	if (sel_desel)
-	{
-RECMDS7:
-		SDICARG = RCA << 16;
-		SDICCON = (0x1 << 9) | (0x1 << 8) | 0x47;
-		if (sd_cmd_end(7, 1) == RT_ERROR)
-			goto RECMDS7;
-
-		SDICSTA = 0xa00;
-
-		if ((SDIRSP0 & 0x1e00) != 0x800)
-			goto RECMDS7;
-	}
-	else
-	{
-RECMDD7:
-		SDICARG = 0<<16;
-		SDICCON = (0x1<<8)|0x47;
-
-		if (sd_cmd_end(7, 0) == RT_ERROR)
-			goto RECMDD7;
-		SDICSTA = 0x800;
-	}
-}
-
-static void sd_setbus(void)
-{
-    do
-    {
-        sd_cmd55();
-
-        SDICARG = 1<<1; /* 4bit bus */
-        SDICCON = (0x1<<9)|(0x1<<8)|0x46; /* sht_resp, wait_resp, start, CMD55 */
-    } while (sd_cmd_end(6, 1) == RT_ERROR);
-
-    SDICSTA = 0xa00;	    /* Clear cmd_end(with rsp) */
-}
-
-static int sd_ocr(void)
-{
-	int i;
-
-	/* Negotiate operating condition for SD, it makes card ready state */
-	for (i=0; i<50; i++)
-	{
-		sd_cmd55();
-
-		SDICARG = 0xff8000;
-		SDICCON = (0x1<<9)|(0x1<<8)|0x69;
-
-		/* if using real board, should replace code here. need to modify qemu in near future*/
-		/* Check end of ACMD41 */
-		if ((sd_cmd_end(41, 1) == RT_EOK) & (SDIRSP0 == 0x80ff8000))
-		{
-			SDICSTA = 0xa00;
-			return RT_EOK;
-		}
-
-		sd_delay(200);
-	}
-	SDICSTA = 0xa00;
-
-	return RT_ERROR;
-}
-
-static rt_uint8_t sd_init(void)
-{
-	//-- SD controller & card initialize
-	int i;
-	/* Important notice for MMC test condition */
-	/* Cmd & Data lines must be enabled by pull up resister */
-	SDIPRE  = PCLK/(INICLK)-1;
-	SDICON  = (0<<4) | 1;	// Type A, clk enable
-	SDIFSTA = SDIFSTA | (1<<16);
-	SDIBSIZE = 0x200;       /* 512byte per one block */
-	SDIDTIMER = 0x7fffff;     /* timeout count */
-
-	/* Wait 74SDCLK for MMC card */
-	for (i=0; i<0x1000; i++);
-
-	sd_cmd0();
-
-	/* Check SD card OCR */
-	if (sd_ocr() == RT_EOK)
-	{
-		rt_kprintf("In SD ready\n");
-	}
-	else
-	{
-		rt_kprintf("Initialize fail\nNo Card assertion\n");
-		return RT_ERROR;
-	}
-
-RECMD2:
-	SDICARG = 0x0;
-	SDICCON = (0x1<<10)|(0x1<<9)|(0x1<<8)|0x42; /* lng_resp, wait_resp, start, CMD2 */
-	if (sd_cmd_end(2, 1) == RT_ERROR)
-		goto RECMD2;
-
-    SDICSTA = 0xa00;	/* Clear cmd_end(with rsp) */
-
-RECMD3:
-	SDICARG = 0<<16;    /* CMD3(MMC:Set RCA, SD:Ask RCA-->SBZ) */
-	SDICCON = (0x1<<9)|(0x1<<8)|0x43; /* sht_resp, wait_resp, start, CMD3 */
-	if (sd_cmd_end(3, 1) == RT_ERROR)
-		goto RECMD3;
-    SDICSTA = 0xa00;	/* Clear cmd_end(with rsp) */
-
-	RCA = (SDIRSP0 & 0xffff0000 )>>16;
-	SDIPRE = PCLK/(SDCLK)-1; /* Normal clock=25MHz */
-	if ((SDIRSP0 & 0x1e00) != 0x600)
-		goto RECMD3;
-
-	sd_sel_desel(1);
-	sd_delay(200);
-	sd_setbus();
-
-	return RT_EOK;
-}
-
-static rt_uint8_t sd_readblock(rt_uint32_t address, rt_uint8_t* buf)
-{
-	rt_uint32_t status, tmp;
-
-	rd_cnt = 0;
-	SDIFSTA = SDIFSTA | (1<<16);
-
-	SDIDCON = (2 << 22) | (1 << 19) | (1 << 17) | (1 << 16) | (1 << 14) | (2 << 12) | (1 << 0);
-	SDICARG = address;
-
-RERDCMD:
-	SDICCON = (0x1 << 9 ) | (0x1 << 8) | 0x51;
-	if (sd_cmd_end(17, 1) == RT_ERROR)
-	{
-		rt_kprintf("Read CMD Error\n");
-		goto RERDCMD;
-	}
-
-	SDICSTA = 0xa00;
-
-	while (rd_cnt < 128)
-	{
-		if ((SDIDSTA & 0x20) == 0x20)
-		{
-			SDIDSTA = (0x1 << 0x5);
-			break;
-		}
-		status = SDIFSTA;
-		if ((status & 0x1000) == 0x1000)
-		{
-			tmp = SDIDAT;
-			rt_memcpy(buf, &tmp, sizeof(rt_uint32_t));
-			rd_cnt++;
-			buf += 4;
-		}
-	}
-	if (sd_data_end() == RT_ERROR)
-	{
-		rt_kprintf("Dat error\n");
-		return RT_ERROR;
-	}
-
-	SDIDCON = SDIDCON & ~(7<<12);
-	SDIFSTA = SDIFSTA & 0x200;
-	SDIDSTA = 0x10;
-
-	return RT_EOK;
-}
-
-static rt_uint8_t sd_writeblock(rt_uint32_t address, rt_uint8_t* buf)
-{
-	rt_uint32_t status, tmp;
-
-	wt_cnt = 0;
-	SDIFSTA = SDIFSTA | (1 << 16);
-	SDIDCON = (2 << 22) | (1 << 20) | (1 << 17) | (1 << 16) | (1 << 14) | (3 << 12) | (1 << 0);
-	SDICARG = address;
-
-REWTCMD:
-	SDICCON = (0x1 << 9) | (0x1 << 8) | 0x58;
-
-	if (sd_cmd_end(24, 1) == RT_ERROR)
-		goto REWTCMD;
-
-	SDICSTA = 0xa00;
-
-	while (wt_cnt < 128*1)
-	{
-		status = SDIFSTA;
-		if ((status & 0x2000) == 0x2000)
-		{
-			rt_memcpy(&tmp, buf, sizeof(rt_uint32_t));
-			SDIDAT = tmp;
-			wt_cnt++;
-			buf += 4;
-		}
-	}
-
-	if (sd_data_end() == RT_ERROR)
-	{
-		rt_kprintf("Data Error\n");
-		return RT_ERROR;
-	}
-	SDIDCON = SDIDCON &~ (7<<12);
-	SDIDSTA = 0x10;
-
-	return RT_EOK;
-}
-
-
 
 #ifdef RT_USING_DFS
 /* RT-Thread Device Driver Interface */
