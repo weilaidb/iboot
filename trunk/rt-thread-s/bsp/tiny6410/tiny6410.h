@@ -141,5 +141,7 @@
 
 #define BL2_ADDR					0x00008000
 
+#define VIRT_2_PHYS(x)				((x) + MEMORY_BASE_ADDRESS)
+
 
 #endif /* end of __TINY6410_H__ */

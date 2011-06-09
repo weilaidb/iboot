@@ -127,8 +127,7 @@ void rt_hw_interrupt_install(int vector, rt_isr_handler_t new_handler, rt_isr_ha
 	{
 		if (*old_handler != RT_NULL)
 			*old_handler = (rt_isr_handler_t)s3c_readl(VIC0VECTADDR(vector));
-		if (new_handler != RT_NULL)
-			s3c_writel((rt_ubase_t)new_handler, VIC0VECTADDR(vector));
+		s3c_writel((rt_ubase_t)new_handler, VIC0VECTADDR(vector));
 		return;
 	}
 
@@ -138,8 +137,7 @@ void rt_hw_interrupt_install(int vector, rt_isr_handler_t new_handler, rt_isr_ha
 
 		if (*old_handler != RT_NULL)
 			*old_handler = (rt_isr_handler_t)s3c_readl(VIC1VECTADDR(vector));
-		if (new_handler != RT_NULL)
-			s3c_writel((rt_ubase_t)new_handler, VIC1VECTADDR(vector));
+		s3c_writel((rt_ubase_t)new_handler, VIC1VECTADDR(vector));
 		return;
 	}
 }
