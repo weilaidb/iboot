@@ -19,7 +19,6 @@
 #define TIMER3_INTERRUPT_ENABLE	(1<<3)
 #define SYS_TIMER_PRESCALER		2
 #define SYS_TIMER_DIVIDER		1
-#define S3C6410_PCLK			(66*1000*1000)
 
 #define SAMPLE_BPS				9600
 #define REQ_INFO				0x60U
@@ -61,14 +60,16 @@ static inline int get_pin_value(void)
 	rt_ubase_t regv;
 
 	regv = s3c_readl(GPFDAT);
-	return !!(regv & (1 << 15));
+	return (regv & (1 << 15)) ? 1 : 0;
 }
 
 static void init_timer(void)
 {
 	rt_ubase_t regv;
+	rt_uint32_t pclk;
 
-	regv = (S3C6410_PCLK / (SYS_TIMER_PRESCALER * SYS_TIMER_DIVIDER * SAMPLE_BPS) - 1);
+	pclk = s3c_get_pclk();
+	regv = (pclk / (SYS_TIMER_PRESCALER * SYS_TIMER_DIVIDER * SAMPLE_BPS) - 1);
 	s3c_writel(regv, TCNTB3);
 
 	regv = s3c_readl(TINT_CSTAT) & 0x1F;

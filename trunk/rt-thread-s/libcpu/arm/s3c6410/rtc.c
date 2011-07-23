@@ -66,7 +66,7 @@ void rt_hw_rtc_get(struct tm *ti)
 	ti->tm_min  	= BCD2BIN(min  & 0x7F);
 	ti->tm_hour 	= BCD2BIN(hour & 0x3F);
 	ti->tm_mday 	= BCD2BIN(mday & 0x3F);
-	ti->tm_mon  	= BCD2BIN(mon & 0x1F);
+	ti->tm_mon  	= BCD2BIN(mon  & 0x1F);
 	ti->tm_year 	= BCD2BIN(year);
 	ti->tm_wday 	= BCD2BIN(wday & 0x07);
 	ti->tm_yday 	= 0;

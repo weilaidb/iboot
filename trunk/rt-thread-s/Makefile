@@ -1,5 +1,5 @@
 #/*
-# * File      : cpu.c
+# * File      : Makefile
 # * This file is part of RT-Thread RTOS
 # * COPYRIGHT (C) 2006, RT-Thread Develop Team
 # *
