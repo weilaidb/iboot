@@ -154,7 +154,7 @@ static int wait_for_cmd_done(rt_card_t *psd)
 	for (i=0; i<0x20000000; i++)
 	{
 		n_int = s3c_readw(psd->regbase + oNORINTSTS);
-		rt_kprintf("SD[%d] HM_NORINTSTS: %04x\n", psd->index, n_int);
+		//rt_kprintf("SD[%d] HM_NORINTSTS: %04x\n", psd->index, n_int);
 		if (n_int & 0x8000)
 			break;
 		if (n_int & 0x0001)
@@ -184,16 +184,16 @@ static void clear_command_complete_status(rt_card_t *psd)
 
 static void clear_transfer_complete_status(rt_card_t *psd)
 {
-	s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 1), psd->regbase + oNORINTSTS);
+	s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | 0x2, psd->regbase + oNORINTSTS);
 	while (s3c_readw(psd->regbase + oNORINTSTS) & 0x2)
-		s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 1), psd->regbase + oNORINTSTS);
+		s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | 0x2, psd->regbase + oNORINTSTS);
 }
 
 static void clear_buffer_read_ready_status(rt_card_t *psd)
 {
-	s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 5), psd->regbase + oNORINTSTS);
+	s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | 0x20, psd->regbase + oNORINTSTS);
 	while (s3c_readw(psd->regbase + oNORINTSTS) & 0x20)
-		s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | (1 << 5), psd->regbase + oNORINTSTS);
+		s3c_writew(s3c_readw(psd->regbase + oNORINTSTS) | 0x20, psd->regbase + oNORINTSTS);
 }
 
 static void sdmmc_reset(rt_card_t *psd)
@@ -207,6 +207,7 @@ static void sdmmc_set_gpio(rt_card_t *psd)
 
 	if (psd->index == 0)
 	{
+		// GPIOG0..6
 		regv = s3c_readl(GPGCON) & 0xf0000000;
 		s3c_writel(regv | 0x02222222, GPGCON);
 
@@ -215,6 +216,7 @@ static void sdmmc_set_gpio(rt_card_t *psd)
 	}
 	else if (psd->index == 1)
 	{
+		// GPIOH0..5
 		s3c_writel(0x00222222, GPHCON0);
 		s3c_writel(0x00000000, GPHCON1);
 
@@ -333,7 +335,7 @@ static void set_cmd_register(rt_card_t *psd, rt_uint16_t cmd,
 {
 	rt_uint16_t val = (cmd << 8);
 
-	if (cmd == 12)
+	if (cmd == MMC_STOP_TRANSMISSION)
 		val |= (3 << 6);
 
 	if (flags & MMC_RSP_136)			// Long RSP
@@ -356,6 +358,8 @@ static void set_cmd_register(rt_card_t *psd, rt_uint16_t cmd,
 	s3c_writew(val, psd->regbase + oCMDREG);
 }
 
+
+#define WAIT_PRNSTS_CNT		0x1000000
 static int issue_command(rt_card_t *psd, rt_uint16_t cmd,
 						rt_uint32_t arg, rt_uint32_t data, rt_uint32_t flags)
 {
@@ -363,28 +367,28 @@ static int issue_command(rt_card_t *psd, rt_uint16_t cmd,
 
 	rt_kprintf("SD[%d] ### issue_command: %d, %08x, %d, %08x\n", psd->index, cmd, arg, data, flags);
 	// Check CommandInhibit_CMD
-	for (i=0; i<0x1000000; i++)
+	for (i=0; i<WAIT_PRNSTS_CNT; i++)
 	{
 		if (!(s3c_readl(psd->regbase + oPRNSTS) & 0x1))
 			break;
 	}
-	if (i == 0x1000000)
+	if (i == WAIT_PRNSTS_CNT)
 		rt_kprintf("SD[%d] ### rHM_PRNSTS: %08lx\n", psd->index, s3c_readl(psd->regbase + oPRNSTS));
 
 	// Check CommandInhibit_DAT
 	if (flags & MMC_RSP_BUSY)
 	{
-		for (i=0; i<0x1000000; i++)
+		for (i=0; i<WAIT_PRNSTS_CNT; i++)
 		{
 			if (!(s3c_readl(psd->regbase + oPRNSTS) & 0x2))
 				break;
 		}
-		if (i == 0x1000000)
+		if (i == WAIT_PRNSTS_CNT)
 			rt_kprintf("SD[%d] ### rHM_PRNSTS: %08lx\n", psd->index, s3c_readl(psd->regbase + oPRNSTS));
 	}
 
+	// set CMD & ARG
 	s3c_writel(arg, psd->regbase + oARGUMENT);
-
 	set_cmd_register(psd, cmd, data, flags);
 
 	if (wait_for_cmd_done(psd))

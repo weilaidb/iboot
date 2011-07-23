@@ -1090,6 +1090,18 @@ static inline void s3c_writel(unsigned int lval, unsigned int addr)
 #define BCDMON					(ELFIN_RTC_BASE + oBCDMON)
 #define BCDYEAR					(ELFIN_RTC_BASE + oBCDYEAR)
 
+
+/*
+ * IIC
+ */
+#define oIICCON					0x00
+#define oIICSTAT				0x04
+#define oIICADD					0x08
+#define oIICDS					0x0c
+#define oIICLC					0x10
+
+
+
 /*
  * USB2.0 HS OTG (Chapter 26)
  */
