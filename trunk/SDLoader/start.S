@@ -73,6 +73,9 @@ _start:
     // initialize DDR
     bl      mem_ctrl_asm_init
 
+    // nand initialize
+    bl      nand_asm_init
+
 	// clear .bss
 	mov    r0, #0                   // get a zero
 	ldr    r1, =__bss_start         // bss start

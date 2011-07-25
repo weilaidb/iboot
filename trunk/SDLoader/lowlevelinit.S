@@ -236,3 +236,21 @@ _check_dmc1_ready:
     nop
 
     mov     pc, lr
+
+
+    /*
+     * Nand Interface Init for SMDK6400
+    */
+    .globl  nand_asm_init
+nand_asm_init:
+    ldr     r4, =ELFIN_NAND_BASE
+    ldr     r5, [r4, #oNFCONF]
+    orr     r5, r5, #0x70
+    orr     r5, r5, #0x7700
+    str     r5, [r4, #oNFCONF]
+
+    ldr     r5, [r4, #oNFCONT]
+    orr     r5, r5, #0x03
+    str     r5, [r4, #oNFCONT]
+
+    mov     pc, lr
