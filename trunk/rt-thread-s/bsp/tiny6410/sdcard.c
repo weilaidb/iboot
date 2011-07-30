@@ -21,7 +21,6 @@
 
 
 
-
 static void sd_sys_clk_init(void)
 {
 	rt_uint32_t regv, val;

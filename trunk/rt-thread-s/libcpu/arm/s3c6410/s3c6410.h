@@ -1476,6 +1476,9 @@ struct rt_hw_register
 #define RAM_BASE			0x50000000	/*Start address of RAM		*/
 #define ROM_BASE			0x00000000	/*Start address of Flash	*/
 
+/* all 256M ddr mapped to 0x000000000 */
+#define s3c_vir_to_phy(vaddr)		((vaddr) + RAM_BASE)
+
 
 #ifdef __cplusplus
 }

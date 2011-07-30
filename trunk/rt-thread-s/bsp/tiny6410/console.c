@@ -1,9 +1,10 @@
 #include <rtthread.h>
-
 #include <serial.h>
+#include "lcd.h"
 
-#define RT_CONSOLE_WIDTH		480
-#define RT_CONSOLE_HEIGHT		272
+
+#define RT_CONSOLE_WIDTH		LCD_WIDTH
+#define RT_CONSOLE_HEIGHT		LCD_HEIGHT
 
 #define RT_CONSOLE_FONT_WIDTH	8
 #define RT_CONSOLE_FONT_HEIGHT	16
